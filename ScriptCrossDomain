@@ -1,0 +1,882 @@
+var ScriptCrossDomain = {
+    Class: function(callbackFinishExecution) {
+        "use strict"
+        var _generalSettings = GeneralSettings.New();
+        var _iframeSettings = IframeSettings.New();
+        var _storageManager = null;
+        var _logManager = LogManager.New();
+        var _listenerManager = ExternalEventManager.New();
+        var _handshakeFinish = false;
+
+        var _callbackCaller = callbackFinishExecution;
+        var _postMessagesDelay = [];
+
+        this.Init = function(iframeId) {
+            
+
+            if (iframeId) {
+                this.InitializeStorage(true);
+            }
+            else {
+                this.InitializeStorage(false);
+            }
+
+            _logManager.TraceOn(true);
+            _logManager.SCDTrace("SessionAbandon");
+            _storageManager.SessionAbandon(false);
+            //_storageManager.SessionAbandon(true);
+            _logManager.SCDTrace("IsSessionAvaiable = " + _storageManager.IsSessionAvaiable());
+
+            if (_storageManager.IsSessionAvaiable()) {
+
+                this.LoadSettings(_storageManager.ParentUrl(), _storageManager.TokenLocal(), _storageManager.TokenParent(), _storageManager.IFrameId());
+                this.StartInternalListener();
+
+                if (!_iframeSettings.IframeID()) {
+                    this.PostMessageReloadUrl();
+                }
+            }
+            else {
+                this.LoadInitialSettings(iframeId);
+
+                if (_iframeSettings.IframeID()) {
+                    this.InitHandshakeParent();
+                }
+                else {
+                    this.InitHandshakeChild();
+                }
+            }
+        }
+
+        this.InitializeStorage = function(isIframe) {
+            _storageManager = StorageManager.New(isIframe);
+        }
+
+        this.InitHandshakeChild = function() {
+            var instanceOfScriptCrossDomain = this;
+            var funcFinishHandshake = function(parentUrl, localToken, parentToken) {
+
+                instanceOfScriptCrossDomain.FinishHandshake(parentUrl, localToken, parentToken);
+            };
+            var handshaker = Handshaker.NewChild(funcFinishHandshake);
+        }
+
+        this.InitHandshakeParent = function() {
+            var instanceOfScriptCrossDomain = this;
+            var funcFinishHandshake = function(parentUrl, localToken, parentToken) {
+
+                instanceOfScriptCrossDomain.FinishHandshake(parentUrl, localToken, parentToken);
+            };
+            var handshaker = Handshaker.NewParent(funcFinishHandshake, _iframeSettings.IframeID(), _iframeSettings.ParentUrl());
+        }
+
+        this.FinishHandshake = function(parentUrl, localtoken, parentToken) {
+            this.LoadSettings(parentUrl, localtoken, parentToken);
+
+            Utilitarios.RemoveEventoNaJanela();
+            this.StartInternalListener();
+
+            _storageManager.TokenLocal(_generalSettings.Token());
+            _storageManager.TokenParent(_generalSettings.TokenParent());
+            _storageManager.ParentUrl(_iframeSettings.ParentUrl());
+        }
+
+        this.LoadSettings = function(parentUrl, localToken, parentToken, iframeId) {
+            _generalSettings.Token(localToken);
+            _generalSettings.TokenParent(parentToken);
+            _iframeSettings.ParentUrl(parentUrl);
+
+            if (iframeId)
+                _iframeSettings.IframeID(iframeId);
+        }
+
+        this.LoadInitialSettings = function(iframeId) {
+            var localUrl = window.location.href;
+            localUrl = Utilitarios.FormataUrlSemHash(localUrl);
+            _iframeSettings.LocalUrl(localUrl);
+
+            if (iframeId) {
+                var parentUrlAux = $("#" + iframeId).attr("src");
+                parentUrlAux = Utilitarios.FormataUrlSemHash(parentUrlAux);
+
+                _iframeSettings.IframeID(iframeId);
+                _iframeSettings.ParentUrl(parentUrlAux);
+
+                _storageManager.IFrameId(iframeId);
+                _storageManager.ParentUrl(parentUrlAux);
+            }
+        }
+
+        this.StartInternalListener = function() {
+            Utilitarios.AddHashChangeListener(this.OnMessageReceived);
+
+
+            _handshakeFinish = true;
+            if (_callbackCaller) {
+                _callbackCaller();
+            }
+
+            if (_postMessagesDelay && _postMessagesDelay.length > 0) {
+                for (var i = 0; i < _postMessagesDelay.length; i++) {
+                    this.PostMessage(_postMessagesDelay[i]);
+                }
+                _postMessagesDelay = null;
+            }
+        }
+
+        this.OnMessageReceived = function() {
+
+            var mensagem = window.location.hash;
+
+            var messageSettings = Utilitarios.FormataMensagemRecebida(mensagem, _generalSettings.TokenParent());
+
+            if (messageSettings.TokenOk) {
+                messageSettings.MensagemFormatada = Utilitarios.DeserializaObjeto(messageSettings.MensagemFormatada);
+
+                if (messageSettings.TipoMensagem === GeneralSettings.MESSAGE_KEY) {
+                    _listenerManager.RaiseEvents(messageSettings.MensagemFormatada);
+                }
+                else if (messageSettings.TipoMensagem === GeneralSettings.RELOAD_URL) {
+                    _iframeSettings.ParentUrl(messageSettings.MensagemFormatada.data.url);
+                    _storageManager.ParentUrl(messageSettings.MensagemFormatada.data.url);
+                }
+            }
+        }
+
+        this.PostMessageReloadUrl = function() {
+            
+            var data = { url: "" };
+            data.url = window.location.href;
+
+            var mensagemFormatada = FormataMensagem(data);
+
+            var urlFormatada = Utilitarios.FormataUrlComHash(_iframeSettings.ParentUrl(), mensagemFormatada, _generalSettings.Token());
+            urlFormatada = Utilitarios.InsertMessageKey(urlFormatada, GeneralSettings.RELOAD_URL);
+
+            PostMessageFromIframe(urlFormatada);
+
+
+            function PostMessageFromIframe(urlFormatada) {
+                Utilitarios.ChangeUrl(urlFormatada);
+            }
+
+            function FormataMensagem(param) {
+                var requestParam = { data: param };
+                requestParam = Utilitarios.SerializaObjeto(requestParam);
+                return requestParam;
+            }
+        }
+
+        this.PostMessage = function(message) {
+
+            if (!_handshakeFinish) {
+                _postMessagesDelay.push(message);
+                return;
+            }
+
+            var mensagemFormatada = FormataMensagem(message);
+            var urlFormatada = Utilitarios.FormataUrlComHash(_iframeSettings.ParentUrl(), mensagemFormatada, _generalSettings.Token());
+
+            urlFormatada = Utilitarios.InsertMessageKey(urlFormatada, GeneralSettings.MESSAGE_KEY);
+
+            if (_iframeSettings.IframeID()) {
+                PostMessageFromParent(urlFormatada);
+            }
+            else {
+                PostMessageFromIframe(urlFormatada);
+            }
+
+            function PostMessageFromIframe(urlFormatada) {
+                Utilitarios.ChangeUrl(urlFormatada);
+            }
+
+            function PostMessageFromParent(urlFormatada) {
+                Utilitarios.ChangeUrl(urlFormatada, _iframeSettings.IframeID());
+            }
+
+            function FormataMensagem(param) {
+                var requestParam = { data: param };
+                requestParam = Utilitarios.SerializaObjeto(requestParam);
+                return requestParam;
+            }
+        }
+
+        this.AddEventListener = function(f) {
+
+            _listenerManager.AddCallbackListener(f);
+            return f;
+        }
+    },
+
+    New: function(iframeId, callbackFinishExecution) {
+        "use strict";
+        var scd;
+        if (callbackFinishExecution) {
+            scd = new this.Class(callbackFinishExecution);
+        }
+        else {
+            scd = new this.Class();
+        }
+
+        scd.Init(iframeId);
+        return scd;
+    }
+};
+
+var Utilitarios = {
+    Hash: "#",
+    SeparatorKey: "___",
+    ConainterKeyToken: "%_000_%",
+    RegexContainerKeyToken: /(\%\_[0-9]{3}\_\%)/,
+    RegexReplaceKeysToken: /(\%_|_\%)/,
+
+    SerializaObjeto: function(param) {
+        var saida = $.toJSON(param);
+        //return JSON.stringify(param);
+        return saida;
+    },
+
+    DeserializaObjeto: function(strParam) {
+        if (strParam.indexOf("#") == 1) {
+            strParam = strParam.substring(1, strParam.lenght);
+        }
+        return $.evalJSON(strParam);
+        //return $.parseJSON(strParam);
+    },
+
+    Querystring: function(key) {
+        var re = new RegExp('(?:\\?|&)' + key + '=(.*?)(?=&|$)', 'gi');
+        var r = [], m;
+        while ((m = re.exec(document.location.search)) != null) r.push(m[1]);
+        return r;
+    },
+
+    AddHashChangeListener: function(callback) {
+        $(window).bind('hashchange', function() {
+
+            callback();
+        });
+    },
+
+    RemoveEventoNaJanela: function() {
+        $(window).unbind('hashchange');
+    },
+
+    ChangeUrl: function(novaUrl, iframeId) {
+        
+        if (iframeId) {
+            $("#" + iframeId).attr("src", novaUrl);
+        }
+        else {
+            parent.location.href = novaUrl;
+        }
+    },
+
+    InsertMessageKey: function(message, messageKey) {
+        return message + Utilitarios.SeparatorKey + messageKey;
+    },
+
+    FormataMensagemRecebida: function(message, expectedToken) {
+        var mensagemFormatada = { MensagemFormatada: null, TipoMensagem: null, TokenOk: null };
+
+        if (message.indexOf(GeneralSettings.MESSAGE_KEY) != -1) {
+            mensagemFormatada.TipoMensagem = GeneralSettings.MESSAGE_KEY;
+            mensagemFormatada.MensagemFormatada = message.substring(1, message.indexOf(expectedToken) - 2);
+            if (expectedToken) {
+                mensagemFormatada.TokenOk = (message.indexOf(expectedToken) != -1 ? true : false);
+                mensagemFormatada.MensagemFormatada = Utilitarios.RemoveTokenFromMessage(mensagemFormatada.MensagemFormatada);
+            }
+        }
+
+        else if (message.indexOf(GeneralSettings.HANDSHAKER_KEY) != -1) {
+            mensagemFormatada.TipoMensagem = GeneralSettings.HANDSHAKER_KEY;
+            mensagemFormatada.MensagemFormatada = message.substring(0, message.indexOf(Utilitarios.SeparatorKey));
+        }
+
+        else if (message.indexOf(GeneralSettings.RELOAD_URL) != -1) {
+            mensagemFormatada.TipoMensagem = GeneralSettings.RELOAD_URL;
+            mensagemFormatada.MensagemFormatada = message.substring(1, message.indexOf(expectedToken) - 2);
+            if (expectedToken) {
+                mensagemFormatada.TokenOk = (message.indexOf(expectedToken) != -1 ? true : false);
+                mensagemFormatada.MensagemFormatada = Utilitarios.RemoveTokenFromMessage(mensagemFormatada.MensagemFormatada);
+            }
+        }
+
+        else if (message.indexOf(GeneralSettings.HANDSHAKER_OK) != -1) {
+            mensagemFormatada.TipoMensagem = GeneralSettings.HANDSHAKER_OK;
+        }
+
+        else {
+            mensagemFormatada.TipoMensagem = GeneralSettings.ERROR_KEY;
+        }
+
+        return mensagemFormatada;
+    },
+
+    FormataUrlComHash: function(url, message, token) {
+        if (token) {
+            var tokenFormatado = Utilitarios.ConainterKeyToken.replace("000", token);
+            return url + Utilitarios.Hash + message + tokenFormatado;
+        }
+        else {
+            return url + Utilitarios.Hash + message;
+        }
+    },
+
+    FormataUrlSemHash: function(url) {
+        var localUrl = url;
+        var indexOfHash = localUrl.indexOf("#");
+
+        if (indexOfHash == -1) {
+            return localUrl;
+        }
+        else {
+            return localUrl.substring(0, indexOfHash);
+        }
+    },
+
+    InsertToken: function(url, token) {
+        var tokenAux = Utilitarios.ConainterKeyToken.replace("000", token);
+
+        if (url.indexOf(tokenAux) != -1)
+            return url;
+        return url + tokenAux;
+    },
+
+    GetTokenFromMessage: function(message) {
+        var tokenMessage = "";
+        var re = new RegExp(Utilitarios.RegexContainerKeyToken);
+        var m = re.exec(message);
+
+        if (m) {
+            tokenMessage = tokenMessage + m[0];
+            tokenMessage = tokenMessage.replace(Utilitarios.RegexReplaceKeysToken, "");
+            tokenMessage = tokenMessage.replace(Utilitarios.RegexReplaceKeysToken, "");
+        }
+        return tokenMessage;
+    },
+
+    RemoveTokenFromMessage: function(message) {
+        var tokenMessage = message;
+
+        tokenMessage = tokenMessage.replace(Utilitarios.RegexContainerKeyToken, "");
+        tokenMessage = tokenMessage.replace(Utilitarios.RegexContainerKeyToken, "");
+
+        return tokenMessage;
+    },
+
+    GeraToken: function() {
+        var token = new String(Math.floor((Math.random() * 1000) + 1));
+        if (token.length < 3) token = "0" + token;
+        if (token.length > 3) token = token.substring(0, 3);
+        return token;
+    }
+};
+
+var ExternalEventManager = {
+    Class: function() {
+        var listenersCallback = [];
+
+        this.AddCallbackListener = function(callback) {
+            if (callback)
+                listenersCallback.push(callback);
+        }
+
+        this.RaiseEvents = function(argument) {
+            for (var i = 0; i < listenersCallback.length; i++)
+                listenersCallback[i](argument);
+        }
+
+        this.ResetListenersArray = function() {
+            listenersCallback = [];
+        }
+
+        this.CallbackHandler = function(callback) {
+            if (callback)
+                listenersCallback.push(callback);
+            else
+                return listenersCallback;
+        }
+    },
+
+    New: function() { return new this.Class(); }
+};
+
+var Handshaker = {
+    Class: function(callbackHandshakefinish, iframeId, parentUrl) {
+        var _callback = callbackHandshakefinish;
+        var _handshakeFinish = false;
+        var _tokenReceived = "";
+        var _parentUrl = "";
+        var _parentUrl = parentUrl;
+
+        var _parentToken = "";
+        var _localToken = "";
+
+        var _isIframe = false;
+        var _iframeId = iframeId;
+
+        if (!iframeId) {
+            _isIframe = true;
+        }
+
+        this.HandshakeFinish = function(value) {
+            if (value)
+                _handshakeFinish = value;
+            else
+                return _handshakeFinish;
+        }
+
+        this.Init = function() {
+            if (_isIframe)
+                this.InitChild();
+            else
+                this.InitParent();
+        }
+
+        this.InitChild = function() {
+
+            if (this.TryLoadResponse()) {
+                this.ChildHandshakeReceived();
+            }
+            else {
+                var selfInstance = this;
+                Utilitarios.AddHashChangeListener(function() {
+                    if (selfInstance.TryLoadResponse()) {
+                        selfInstance.ChildHandshakeReceived();
+                    }
+                });
+            }
+        }
+
+        this.ChildHandshakeReceived = function() {
+            if (this.TryLoadResponse()) {
+                this.ResponseHandshakeChild();
+
+                var selfInstance = this;
+                Utilitarios.AddHashChangeListener(function() {
+                    selfInstance.ChildConfirmationReceived();
+
+                    var selfInstance2 = selfInstance;
+                    Utilitarios.AddHashChangeListener(function() {
+
+                        selfInstance2.ChildConfirmationReceived();
+                    });
+                });
+            }
+        }
+
+        this.ChildConfirmationReceived = function() {
+            var localUrlAux = window.location.href;
+            var indexOfHash = localUrlAux.indexOf("#");
+            var messageReceived = localUrlAux.substring(indexOfHash + 1, localUrlAux.length);
+            var mensagemAux = Utilitarios.FormataMensagemRecebida(messageReceived);
+
+            if (mensagemAux.TipoMensagem == GeneralSettings.HANDSHAKER_OK) {
+                Utilitarios.RemoveEventoNaJanela();
+                this.SendConfirmation(_iframeId);
+                _callback(_parentUrl, _localToken, _parentToken);
+            }
+        }
+
+        this.ResponseHandshakeChild = function() {
+            _localToken = Utilitarios.GeraToken();
+
+            var urlAux = _parentUrl + Utilitarios.Hash;
+            var url = Utilitarios.InsertToken(urlAux, _localToken); ;
+
+
+            url = Utilitarios.InsertMessageKey(url, GeneralSettings.HANDSHAKER_KEY);
+
+            Utilitarios.ChangeUrl(url);
+        }
+
+        this.InitParent = function() {
+            this.SendHandshakeFromParent();
+
+            var selfInstance = this;
+            Utilitarios.AddHashChangeListener(function() {
+
+                selfInstance.ParentOnHandshakeReceived(window.location.hash);
+            });
+        }
+
+        this.SendHandshakeFromParent = function() {
+            _localToken = Utilitarios.GeraToken();
+            var localUrl = window.location.href;
+
+            var hash = Utilitarios.Hash;
+            if (localUrl.indexOf(hash) != -1) {
+                localUrl = localUrl.substring(0, localUrl.indexOf(hash));
+            }
+
+            var urlHandshaker = Utilitarios.FormataUrlComHash(_parentUrl, localUrl, _localToken);
+            urlHandshaker = Utilitarios.InsertMessageKey(urlHandshaker, GeneralSettings.HANDSHAKER_KEY);
+
+            Utilitarios.ChangeUrl(urlHandshaker, _iframeId);
+        }
+
+        this.ParentOnHandshakeReceived = function(message) {
+            var receivedMessage = this.TryLoadResponse();
+
+            if (receivedMessage) {
+                this.ParentResponseConfirmation();
+            }
+        }
+
+        this.ParentResponseConfirmation = function() {
+
+            this.SendConfirmation(_iframeId);
+
+            Utilitarios.RemoveEventoNaJanela();
+
+            var selfInstance = this;
+
+            Utilitarios.AddHashChangeListener(function() {
+
+                var localUrlAux = window.location.href;
+                var indexOfHash = localUrlAux.indexOf("#");
+                var messageReceived = localUrlAux.substring(indexOfHash + 1, localUrlAux.length);
+                var mensagemAux = Utilitarios.FormataMensagemRecebida(messageReceived);
+
+
+                if (mensagemAux.TipoMensagem == GeneralSettings.HANDSHAKER_OK) {
+                    Utilitarios.RemoveEventoNaJanela();
+                    _callback(_parentUrl, _localToken, _parentToken);
+                }
+            });
+        }
+
+        this.SendConfirmation = function(iframeId) {
+            this.HandshakeFinish(true);
+            var queryUrl = _parentUrl + Utilitarios.Hash + GeneralSettings.HANDSHAKER_OK;
+            Utilitarios.ChangeUrl(queryUrl, iframeId);
+        }
+
+        this.OnHandshakeReceived = function(message) {
+            var receivedMessage = this.TryLoadResponse();
+
+            if (!!receivedMessage) {
+                Utilitarios.RemoveEventoNaJanela();
+
+                if (this.ResponseCaller()) {
+                    var selfInstance = this;
+                    this.AddHashChangeListener(function() {
+                        selfInstance.ResponseCaller();
+                    });
+                }
+            }
+        }
+
+        this.TryLoadResponse = function() {
+            var localUrl = window.location.href;
+            var indexOfHash = localUrl.indexOf("#");
+
+            if (indexOfHash != -1) {
+
+                var messageReceived = localUrl.substring(indexOfHash + 1, localUrl.length);
+
+                var messageSettings = Utilitarios.FormataMensagemRecebida(messageReceived);
+
+
+                messageReceived = Utilitarios.FormataUrlSemHash(messageSettings.MensagemFormatada);
+
+                _parentToken = Utilitarios.GetTokenFromMessage(messageSettings.MensagemFormatada);
+                if (!_parentUrl && !_iframeId) {
+                    _parentUrl = Utilitarios.RemoveTokenFromMessage(messageSettings.MensagemFormatada, _parentToken);
+                }
+                return true;
+            }
+            return false;
+        }
+    },
+
+    NewChild: function(callbackHandshakefinish) {
+        var hds = new this.Class(callbackHandshakefinish);
+        hds.Init();
+        return hds;
+    },
+
+    NewParent: function(callbackHandshakefinish, iframeId, parentUrl) {
+        var hds = new this.Class(callbackHandshakefinish, iframeId, parentUrl);
+        hds.Init();
+        return hds;
+    }
+};
+
+var LogManager = {
+    Class: function() {
+        var querystring = Utilitarios.Querystring('ativarTrace');
+        var trace = false;
+        /*if (jQuery.isArray(querystring)) {
+        trace = (querystring[0] == 'true' ? true : false);
+        }
+        else {
+        trace = (querystring == 'true' ? true : false);
+        }
+
+        var contexto = this;
+
+        try {
+        //Note that some/many error events do not trigger window.onerror, you have to listen for them specifically.
+        var gOldOnError = window.onerror;
+        window.onerror = function (errorMsg, url, lineNumber) {
+        contexto.SCDOnError(errorMsg, url, lineNumber);
+
+        if (gOldOnError)
+        return gOldOnError(errorMsg, url, lineNumber);
+        }
+        }
+        catch (ex) { }*/
+
+        this.TraceOn = function(value) {
+            if (value)
+                trace = value;
+            else
+                trace;
+        }
+
+        this.SCDTrace = function(message) {
+            if (trace) {
+                if (window.console) {
+                    try {
+                        window.console.log('SCD Trace: ' + s);
+                    }
+                    catch (e) { }
+
+                    try {
+                        //window["console"] = message;
+                    }
+                    catch (e) { }
+                }
+            }
+        }
+
+        this.SCDOnError = function(errorMsg, url, lineNumber) {
+            if (window.console) {
+                try {
+                    window.console.error('--Inicio erro--');
+                    window.console.error('Mensagem erro: ' + errorMsg);
+                    window.console.error('Linha: ' + lineNumber);
+                    window.console.error('URL: ' + url);
+                    window.console.error('--Fim erro--');
+                }
+                catch (e) { }
+            }
+        }
+    },
+
+    New: function() { return new this.Class() }
+};
+
+var StorageManager = {
+    Class: function(isIframe) {
+        var _sessionStorageAvaible = false;
+        var _sm_tokenLocal = "";
+        var _sm_tokenParent = "";
+        var _sm_parentUrl = "";
+        var _sm_iFrameId = "";
+        var keys = ["scd_token", "scd_parent_url", "scd_token_parent", "scd_iframe_id"];
+        var _isIframe = (isIframe == true ? true : false);
+
+        if (typeof (Storage) !== "undefined") {
+            _sessionStorageAvaible = true;
+        }
+        //REMOVER
+        _sessionStorageAvaible = false;
+
+        this.Key = function(index) {
+            var saida = keys[index];
+            if (_isIframe) {
+                saida = saida + "_ch";
+            }
+            return saida;
+        }
+
+        this.IsSessionAvaiable = function() {
+            var tokenLocalAux = this.TokenLocal();
+            var tokenParentAux = this.TokenParent();
+            var parentUrlAux = this.ParentUrl();
+            var iframeIdAux = this.IFrameId();
+
+            if (tokenLocalAux && tokenParentAux && parentUrlAux) {
+                return true;
+            }
+
+            return false;
+        }
+
+        this.TokenLocal = function(value) {
+            if (value) {
+                if (!_sm_tokenLocal || value != _sm_tokenLocal) {
+                    _sm_tokenLocal = value;
+                    this.ValueStorage(this.Key(0), value);
+                }
+            }
+            else {
+                if (!_sm_tokenLocal) {
+                    _sm_tokenLocal = this.ValueStorage(this.Key(0));
+                }
+                return _sm_tokenLocal;
+            }
+        }
+
+        this.TokenParent = function(value) {
+            if (value) {
+                if (!_sm_tokenParent || value != _sm_tokenParent) {
+                    _sm_tokenParent = value;
+                    this.ValueStorage(this.Key(2), value);
+                }
+            }
+            else {
+                if (!_sm_tokenParent) {
+                    _sm_tokenParent = this.ValueStorage(this.Key(2));
+                }
+                return _sm_tokenParent;
+            }
+        }
+
+        this.ParentUrl = function(value) {
+            if (value) {
+                if (!_sm_parentUrl || value != _sm_parentUrl) {
+                    _sm_parentUrl = value;
+                    this.ValueStorage(this.Key(1), value);
+                }
+            }
+            else {
+                if (!_sm_parentUrl) {
+                    _sm_parentUrl = this.ValueStorage(this.Key(1));
+                }
+                return _sm_parentUrl;
+            }
+        }
+
+        this.IFrameId = function(value) {
+            if (value) {
+                if (!_sm_iFrameId || value != _sm_iFrameId) {
+                    _sm_iFrameId = value;
+                    this.ValueStorage(this.Key(3), value);
+                }
+            }
+            else {
+                if (!_sm_iFrameId) {
+                    _sm_iFrameId = this.ValueStorage(this.Key(3));
+                }
+                return _sm_iFrameId;
+            }
+        }
+
+        this.ValueStorage = function(chave, valor) {
+            if (valor) {
+                if (_sessionStorageAvaible)
+                    sessionStorage[chave] = valor;
+                else
+                    jQuery.cookie(chave, valor, { path: '/' });
+            }
+            else {
+                if (_sessionStorageAvaible)
+                    return sessionStorage[chave];
+                else
+                    return jQuery.cookie(chave);
+            }
+        }
+
+        this.SessionAbandon = function(param) {
+            if (!param) {
+                var context = this;
+                $('<input>').attr({
+                    type: 'button',
+                    id: 'limpaSessao',
+                    value: "Limpar"
+                }).appendTo('body');
+
+                $("#limpaSessao").bind("click", function() {
+                    context.SessionAbandon(true)
+                });
+            }
+            else {
+                if (_sessionStorageAvaible) {
+                    sessionStorage.removeItem(this.Key(0));
+                    sessionStorage.removeItem(this.Key(1));
+                    sessionStorage.removeItem(this.Key(2));
+                    sessionStorage.removeItem(this.Key(3));
+                    sessionStorage.clear();
+                }
+
+                var valueEmpty = "";
+                for (var i = 0; i < this.Key.length; i++) {
+                    $.cookie(this.Key(i), valueEmpty, { path: '/' });
+                }
+                var text = "Limpou " + window.location.href + " " + new Date().toString();
+                $('<input>').attr({
+                    type: 'text',
+                    id: 'statusSessao',
+                    value: text,
+                    width: "900px"
+                }).appendTo('body');
+            }
+        }
+    },
+
+    New: function(isIframe) { return new this.Class(isIframe) }
+};
+
+var IframeSettings = {
+    Class: function() {
+        var parentUrl = null;
+        var localUrl = null;
+        var iframeId = null;
+
+        this.ParentUrl = function(url) {
+            if (url)
+                parentUrl = Utilitarios.FormataUrlSemHash(url);
+            else
+                return parentUrl;
+        }
+
+        this.LocalUrl = function(url) {
+            if (url)
+                localUrl = Utilitarios.FormataUrlSemHash(url);
+            else
+                return localUrl;
+        }
+
+        this.IframeID = function(id) {
+            if (id)
+                iframeId = id;
+            else
+                return iframeId;
+        }
+    },
+
+    New: function() { return new this.Class() }
+};
+
+var GeneralSettings = {
+    HANDSHAKER_KEY: "HDS",
+    RELOAD_URL: "RLDURL",
+    MESSAGE_KEY: "MESSAGE",
+    ERROR_KEY: "ERROR",
+    HANDSHAKER_OK: "HS_OK",
+
+    Class: function() {
+        var _token = "";
+        var _token_parent = "";
+
+        this.TokenParent = function(value) {
+            if (value)
+                _token_parent = value;
+            else
+                return _token_parent;
+        }
+
+        this.Token = function(value) {
+            if (value)
+                _token = value;
+            else
+                return _token;
+        }
+    },
+
+    New: function() { return new this.Class() }
+};
